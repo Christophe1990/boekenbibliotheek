@@ -4,9 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Onze Bibliotheek</title>
-<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Nunito:wght@400;600;700;800&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Nunito:wght@400;600;700;800&display=swap"></noscript>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+<!-- ZXing wordt pas geladen wanneer nodig (bij barcode scan) -->
 <style>
 :root{
   --cream:#FAF6EF;--cream-dark:#F0EAE0;--paper:#FFFDF8;
@@ -338,7 +341,14 @@ input[type=file]{display:none;}
 </style>
 </head>
 <body>
-<div id="notif"></div>
+<!-- LAADSCHERM -->
+<div id="splash" style="position:fixed;inset:0;background:linear-gradient(160deg,#1A3D2B,#2D6A4F);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;transition:opacity .4s;">
+  <div style="font-size:56px;margin-bottom:16px">📚</div>
+  <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#FFFDF8;margin-bottom:8px">Onze Bibliotheek</div>
+  <div style="font-size:13px;color:rgba(255,255,255,.6);font-style:italic;margin-bottom:24px">Een gedeelde boekenhoek</div>
+  <div style="width:48px;height:48px;border:3px solid rgba(255,255,255,.2);border-top-color:#C4922A;border-radius:50%;animation:spin .8s linear infinite"></div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+</div>
 <div id="firebase-warning"><strong>⚠️ Demo-modus actief</strong> Vul je Firebase-configuratie in voor realtime synchronisatie.</div>
 
 <!-- HEADER -->
@@ -582,7 +592,6 @@ input[type=file]{display:none;}
   </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script type="module">
 import { initializeApp }    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy }
@@ -1121,6 +1130,7 @@ function startListener(){
     if(!first)books.forEach(b=>{if(!prev.has(b.id)&&b.addedBy!==currentUser)showNotif(`📚 ${b.addedBy||'Iemand'} voegde "${b.title}" toe!`);});
     const ms=new Set(CLUB);books.forEach(b=>{if(b.owner)ms.add(b.owner);if(b.currentHolder)ms.add(b.currentHolder);});
     members=Array.from(ms).sort();
+    if(first) hideSplash(); // Verberg splash na eerste lading
     renderAll();
     if(detailId){const u=books.find(b=>b.id===detailId);if(u)renderDetail(u);}
   });
@@ -1159,6 +1169,24 @@ function startDemo(){
 // ── ISBN HELPERS ──────────────────────────────────────────────
 // ── BESCHRIJVING OPHALEN PER BOEK ────────────────────────────
 async function fetchDescriptionForBook(book){
+  // Gebruik de serverless functie voor betere resultaten
+  try{
+    const isbn=(book.isbn||'').replace(/[\s\-]/g,'');
+    const params=new URLSearchParams();
+    if(isbn) params.set('isbn',isbn);
+    if(book.title) params.set('titel',book.title);
+    if(book.author) params.set('auteur',book.author||'');
+    const res=await fetch('/api/boekinfo?'+params.toString());
+    if(res.ok){
+      const data=await res.json();
+      if(data.description&&data.description.length>60) return data.description;
+    }
+  }catch(e){}
+  // Fallback naar originele logica
+  return await _fetchDescriptionFallback(book);
+}
+
+async function _fetchDescriptionFallback(book){
   const isbn=(book.isbn||'').replace(/[\s\-]/g,'');
   const titel=book.title||'', auteur=book.author||'';
   // 1. Open Library via ISBN
@@ -1195,80 +1223,30 @@ async function fetchDescriptionForBook(book){
 }
 
 async function fetchIsbnInfo(isbn){
+  // Gebruik de Netlify serverless functie — die kan wél overal bij
+  try{
+    const res = await fetch(`/api/boekinfo?isbn=${encodeURIComponent(isbn)}`);
+    if(res.ok){
+      const data = await res.json();
+      if(data.title||data.author) return data;
+    }
+  }catch(e){}
+  // Fallback: rechtstreeks proberen (werkt voor internationale boeken)
   const r={};
-  const [gbRes,olApiRes,olIsbnRes,kbRes]=await Promise.allSettled([
-    fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&country=BE&maxResults=1`).then(x=>x.json()),
-    fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`).then(x=>x.json()),
-    fetch(`https://openlibrary.org/isbn/${isbn}.json`).then(x=>x.ok?x.json():null),
-    fetchKb(isbn)
-  ]);
-  // Google Books
-  if(gbRes.status==='fulfilled'){
-    const item=gbRes.value?.items?.[0];const vi=item?.volumeInfo;
-    if(vi){
+  try{
+    const gb=await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&country=BE&maxResults=1`).then(x=>x.json());
+    const item=gb.items?.[0];const vi=item?.volumeInfo;
+    if(vi&&(vi.title||vi.authors)){
       if(vi.title)r.title=vi.title;if(vi.authors?.length)r.author=vi.authors.join(', ');
       if(vi.publishedDate)r.year=vi.publishedDate.substring(0,4);if(vi.pageCount)r.pages=vi.pageCount;
       if(vi.language)r.language=vi.language;if(vi.publisher)r.publisher=vi.publisher;
-      if(vi.categories?.length)r.subjects=vi.categories.slice(0,5).join(', ');
       if(vi.description)r.description=vi.description.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
       if(item?.id)r.coverUrl=`https://books.google.com/books/content?id=${item.id}&printsec=frontcover&img=1&zoom=0&source=gbs_api`;
-      if(r.title)r.source='Google Books';
+      r.source='Google Books';
     }
-  }
-  // Open Library Data API
-  if(olApiRes.status==='fulfilled'){
-    const ol=olApiRes.value?.[`ISBN:${isbn}`];
-    if(ol){
-      if(!r.title&&ol.title)r.title=ol.title;if(!r.author&&ol.authors?.length)r.author=ol.authors.map(a=>a.name).join(', ');
-      if(!r.year&&ol.publish_date)r.year=ol.publish_date.replace(/\D.*$/,'');if(!r.pages&&ol.number_of_pages)r.pages=ol.number_of_pages;
-      if(!r.publisher&&ol.publishers?.length)r.publisher=ol.publishers.map(p=>p.name).join(', ');
-      if(!r.subjects&&ol.subjects?.length)r.subjects=ol.subjects.slice(0,5).map(s=>typeof s==='string'?s:s.name).join(', ');
-      if(!r.description&&ol.description)r.description=typeof ol.description==='string'?ol.description:ol.description?.value||'';
-      if(ol.cover?.large)r.coverUrl=ol.cover.large;else if(ol.cover?.medium)r.coverUrl=ol.cover.medium;
-      if(!r.source&&r.title)r.source='Open Library';
-    }
-  }
-  // Open Library ISBN + Works (voor beschrijving)
-  if(olIsbnRes.status==='fulfilled'&&olIsbnRes.value){
-    const ol=olIsbnRes.value;
-    if(!r.title&&ol.title)r.title=ol.title;
-    const desc=typeof ol.description==='string'?ol.description:ol.description?.value||'';
-    if(!r.description&&desc)r.description=desc;
-    if(!r.pages&&ol.number_of_pages)r.pages=ol.number_of_pages;
-    if(!r.coverUrl&&ol.covers?.[0])r.coverUrl=`https://covers.openlibrary.org/b/id/${ol.covers[0]}-L.jpg`;
-    if(!r.source&&r.title)r.source='Open Library';
-    // Works endpoint — heeft vaak uitgebreidere beschrijving
-    if(!r.description&&ol.works?.[0]?.key){
-      try{
-        const work=await fetch(`https://openlibrary.org${ol.works[0].key}.json`).then(x=>x.json());
-        const wd=typeof work.description==='string'?work.description:work.description?.value||'';
-        if(wd)r.description=wd;
-      }catch(e){}
-    }
-  }
-  // KB Nationale Bibliotheek
-  if(kbRes.status==='fulfilled'&&kbRes.value){
-    const kb=kbRes.value;
-    if(!r.title)r.title=kb.title;if(!r.author)r.author=kb.author;if(!r.year)r.year=kb.year;
-    if(!r.pages)r.pages=kb.pages;if(!r.publisher)r.publisher=kb.publisher;
-    if(!r.language)r.language=kb.language;if(!r.subjects)r.subjects=kb.subjects;
-    if(!r.description)r.description=kb.description;if(!r.source)r.source=kb.source;
-  }
-  // Extra poging: Google Books zoeken op titel als beschrijving nog ontbreekt
-  if(!r.description&&r.title){
-    try{
-      const q=encodeURIComponent(`${r.title} ${r.author||''}`);
-      const gb2=await fetch(`https://www.googleapis.com/books/v1/volumes?q=${q}&country=BE&maxResults=3`).then(x=>x.json());
-      const match=gb2.items?.find(it=>it.volumeInfo?.industryIdentifiers?.some(id=>id.identifier===isbn)||it.volumeInfo?.title?.toLowerCase()===r.title?.toLowerCase())||gb2.items?.[0];
-      if(match?.volumeInfo?.description){
-        r.description=match.volumeInfo.description.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
-        if(!r.coverUrl&&match.id)r.coverUrl=`https://books.google.com/books/content?id=${match.id}&printsec=frontcover&img=1&zoom=0&source=gbs_api`;
-      }
-    }catch(e){}
-  }
+  }catch(e){}
   if(!r.coverUrl)r.coverUrl=`https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg`;
-  if(!r.title&&!r.author)return null;
-  return r;
+  return (r.title||r.author)?r:null;
 }
 
 
@@ -1517,11 +1495,20 @@ window.App={
     showNotif(`✅ ${found} beschrijvingen opgehaald!`);
   },
   // ── BARCODE SCANNER ──────────────────────────────────────────
-  startBarcodeScanner(){
+  async startBarcodeScanner(){
     const scanner=$('barcode-scanner'),video=$('barcode-video');
     scanner.style.display='block';
+    $('scan-status').textContent='Barcode-library laden…';
+    // Laad ZXing pas nu (lazy loading)
+    if(!window.ZXing){
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');
+        s.src='https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js';
+        s.onload=res; s.onerror=rej;
+        document.head.appendChild(s);
+      });
+    }
     $('scan-status').textContent='Richt de camera op de barcode…';
-    if(!window.ZXing){showNotif('⚠️ Barcode-library niet geladen.');return;}
     const codeReader=new window.ZXing.BrowserMultiFormatReader();
     window._codeReader=codeReader;
     codeReader.decodeFromVideoDevice(null,'barcode-video',(result,err)=>{
@@ -1956,16 +1943,30 @@ document.addEventListener('click',e=>{
     document.querySelectorAll('.modal.open').forEach(m=>m.classList.remove('open'));
 });
 
+function hideSplash(){
+  const s=$('splash');
+  if(!s)return;
+  s.style.opacity='0';
+  setTimeout(()=>s.remove(),450);
+}
+
 // ── INIT ─────────────────────────────────────────────────────
 renderWelcome();
+// Verberg splash zodra welkomstscherm klaar is
+setTimeout(hideSplash, 300);
 try{
   const saved=localStorage.getItem('bib_user');
   if(saved&&CLUB.includes(saved)){currentUser=saved;$('user-label').textContent=`👤 ${saved}`;$('welcome-modal').classList.remove('open');}
 }catch(e){}
 if(firebaseConfig.apiKey&&firebaseConfig.apiKey!=='JOUW_API_KEY'){
-  try{const app=initializeApp(firebaseConfig);db=getFirestore(app);startListener();}
-  catch(e){console.error(e);startDemo();}
+  try{
+    const app=initializeApp(firebaseConfig);
+    db=getFirestore(app);
+    startListener();
+  }catch(e){console.error(e);startDemo();}
 }else{startDemo();}
 </script>
 </body>
 </html>
+}
+
