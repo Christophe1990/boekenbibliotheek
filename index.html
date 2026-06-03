@@ -1091,6 +1091,11 @@ function renderDetail(book){
       <div class="desc-edit-wrap">
         <textarea class="desc-textarea" id="desc-ta-${book.id}" placeholder="Schrijf hier een korte beschrijving, of haal ze automatisch op via het ISBN…" rows="5" onblur="App.saveDescription('${book.id}',this.value)">${esc(book.description||'')}</textarea>
         ${book.isbn?`<button class="btn-fetch-desc" onclick="App.fetchBookInfo('${book.id}','${esc(book.isbn)}')">🔍 Automatisch ophalen via ISBN</button>`:''}
+      <div style="margin-top:8px;">
+        <label class="btn-fetch-desc" for="detail-back-scan-${book.id}" style="display:inline-block;cursor:pointer;border-style:dashed;border-color:#7B4F8E;color:#7B4F8E;">📖 Scan achterkant boek</label>
+        <input type="file" id="detail-back-scan-${book.id}" accept="image/*" capture="environment" style="display:none" onchange="App.scanBackCover(this,'${book.id}')">
+        <div id="scan-status-${book.id}" style="display:none;margin-top:8px;padding:10px 12px;background:var(--cream);border-radius:8px;font-size:13px;color:var(--ink-light)"></div>
+      </div>
       </div>
       <div class="section-head">Wie heeft dit boek gelezen?</div>
       <div class="readers-row">
@@ -1529,30 +1534,59 @@ window.App={
   },
 
   // ── ACHTERKANT SCANNEN ───────────────────────────────────────
-  async scanBackCover(input){
+  async scanBackCover(input, bookId=null){
     const file=input.files[0];if(!file)return;
-    const status=$('back-scan-status');
-    status.style.display='block';
-    status.textContent='🔍 Tekst wordt herkend…';
+    // Zoek het juiste status-element
+    const statusId = bookId ? `scan-status-${bookId}` : 'back-scan-status';
+    const status = $(statusId) || document.querySelector('[id^="scan-status-"]');
+    if(status){ status.style.display='block'; status.textContent='📷 Foto wordt verwerkt…'; }
     try{
-      const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
-      const resp=await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1024,
-          messages:[{role:'user',content:[
-            {type:'image',source:{type:'base64',media_type:file.type||'image/jpeg',data:b64}},
-            {type:'text',text:'Dit is de achterkant van een boek. Lees de korte inhoud/flaptekst. Geef ENKEL de beschrijving terug in lopende tekst, zonder prijs, ISBN, uitgeverij, websites of andere niet-inhoudelijke tekst.'}
-          ]}]})
+      // Verklein foto eerst
+      const b64 = await new Promise((res,rej)=>{
+        const img=new Image();
+        const url=URL.createObjectURL(file);
+        img.onload=()=>{
+          const maxW=1200,maxH=1600;
+          let {width:w,height:h}=img;
+          const ratio=Math.min(maxW/w,maxH/h,1);
+          w=Math.round(w*ratio);h=Math.round(h*ratio);
+          const canvas=document.createElement('canvas');
+          canvas.width=w;canvas.height=h;
+          canvas.getContext('2d').drawImage(img,0,0,w,h);
+          URL.revokeObjectURL(url);
+          res(canvas.toDataURL('image/jpeg',0.85).split(',')[1]);
+        };
+        img.onerror=()=>{URL.revokeObjectURL(url);rej(new Error('Foto laden mislukt'));};
+        img.src=url;
       });
-      if(!resp.ok)throw new Error('API fout '+resp.status);
-      const data=await resp.json();
-      const tekst=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('').trim();
-      if(tekst.length>30){
+      if(status) status.textContent='🔍 Tekst wordt herkend via AI…';
+      // Stuur naar serverless functie
+      const resp = await fetch('/api/scan',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({image:b64, mediaType:file.type||'image/jpeg'})
+      });
+      const data = await resp.json();
+      if(!resp.ok) throw new Error(data.error||'Scan mislukt');
+      const tekst = data.description;
+      if(bookId){
+        // Sla op in Firebase
+        if(db) await updateDoc(doc(db,'books',bookId),{description:tekst});
+        else{const i=books.findIndex(b=>b.id===bookId);if(i>=0)books[i].description=tekst;}
+        // Vul textarea in
+        const ta=$(`desc-ta-${bookId}`);if(ta)ta.value=tekst;
+        if(status) status.innerHTML=`<strong>✅ Beschrijving opgeslagen!</strong>`;
+        setTimeout(()=>{if(status)status.style.display='none';},3000);
+        showNotif('✅ Achterkant gescand en opgeslagen!');
+      } else {
         window._pendingDescription=tekst;
-        status.innerHTML='<strong>✅ Tekst herkend!</strong><br><span style="font-size:12px;color:var(--ink-faint)">Wordt opgeslagen bij het bewaren van het boek.</span><br><div style="margin-top:8px;font-size:13px;line-height:1.6;color:var(--ink)">'+esc(tekst).substring(0,300)+'…</div>';
+        if(status) status.innerHTML=`<strong>✅ Tekst herkend!</strong><br><span style="font-size:12px;color:var(--ink-faint)">Wordt opgeslagen bij het bewaren van het boek.</span><br><div style="margin-top:8px;font-size:13px;line-height:1.6">${esc(tekst).substring(0,300)}…</div>`;
         showNotif('✅ Achterkant gescand!');
-      }else{status.textContent='⚠️ Geen tekst gevonden. Probeer een scherpere foto.';}
-    }catch(e){status.textContent='⚠️ Scan mislukt: '+e.message;}
+      }
+    }catch(e){
+      if(status) status.textContent='⚠️ '+e.message;
+      showNotif('⚠️ Scan mislukt: '+e.message);
+    }
     input.value='';
   },
 
